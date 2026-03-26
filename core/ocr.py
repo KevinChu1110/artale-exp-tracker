@@ -311,29 +311,25 @@ def capture_gold() -> int | None:
         full = " ".join(texts)
         logger.info("Gold OCR: %s", full[:120])
 
-        # Look for number followed by or near 金幣
-        # Vision might return "267,353,146" and "金幣" as separate items
-        # Or "267,353,146 金幣" as one item
+        # Strategy 1: find "金幣" text and get the number near it
         for i, t in enumerate(texts):
             if "金幣" in t or "金币" in t:
-                # Check if number is in the same text
                 num_match = re.search(r'([\d,]+)', t)
-                if num_match:
+                if num_match and len(num_match.group(1)) > 3:
                     return int(num_match.group(1).replace(",", ""))
-                # Check the previous text item for the number
                 if i > 0:
                     num_match = re.search(r'([\d,]+)', texts[i - 1])
                     if num_match:
                         return int(num_match.group(1).replace(",", ""))
 
-        # Fallback: look for large numbers (>1M) that could be gold
+        # Strategy 2: find numbers WITH commas (gold format: 267,493,263)
+        # This distinguishes gold from EXP (which has no commas)
         for t in texts:
-            clean = t.replace(",", "")
-            num_match = re.search(r'(\d{7,12})', clean)
-            if num_match:
-                val = int(num_match.group(1))
-                # Likely gold if it's a large number not matching EXP
-                if val > 1_000_000:
+            comma_match = re.search(r'(\d{1,3}(?:,\d{3}){2,})', t)
+            if comma_match:
+                val = int(comma_match.group(1).replace(",", ""))
+                if val > 100_000:  # reasonable gold amount
+                    logger.info("Gold found (comma format): %s -> %d", comma_match.group(1), val)
                     return val
 
         return None

@@ -5,7 +5,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QSize, QTimer, Qt, pyqtSlot
+from PyQt6.QtCore import QPoint, QSize, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -40,10 +40,13 @@ def fmt(n: float) -> str:
 
 
 def fmt_wan(n: float) -> str:
-    """Format large numbers in 萬(W) units: 2000000 → '200W'."""
+    """Format large numbers: >=1億 → x.xxe, >=1萬 → xxxW, else raw."""
     v = n if isinstance(n, (int, float)) else 0
-    if abs(v) >= 10000:
-        return f"{v / 10000:,.1f}W"
+    av = abs(v)
+    if av >= 100_000_000:  # 1e = 1億
+        return f"{v / 100_000_000:,.2f}e"
+    if av >= 10_000:  # W = 萬
+        return f"{v / 10_000:,.1f}W"
     return fmt(v)
 
 
@@ -86,6 +89,11 @@ def get_skill_icon_path(slot_index: int) -> str | None:
 #  Compact Floating Overlay
 # ═══════════════════════════════════════════════════════
 class FloatingOverlay(QWidget):
+    """Compact floating HUD. Emits signals to control main window."""
+
+    request_show_settings = pyqtSignal()
+    request_stop = pyqtSignal()
+
     def __init__(self, cooldown_mgr: CooldownManager, tracker=None,
                  theme_name: str = "Dark", show_exp=True, show_gold=True,
                  show_cooldown=True, parent=None):
@@ -119,6 +127,34 @@ class FloatingOverlay(QWidget):
         layout.setSpacing(4)
 
         t = self._theme
+
+        # ── Top control bar (gear + stop) ──
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setContentsMargins(0, 0, 0, 0)
+        ctrl_row.setSpacing(4)
+        ctrl_row.addStretch()
+
+        gear_btn = QPushButton("⚙ 設定")
+        gear_btn.setFixedHeight(24)
+        gear_btn.setStyleSheet(
+            "QPushButton { background: rgba(60,60,70,200); color: #f0c040; font-size: 12px; "
+            "border: 1px solid #f0c040; border-radius: 4px; padding: 2px 10px; }"
+            "QPushButton:hover { background: rgba(80,80,90,220); }"
+        )
+        gear_btn.clicked.connect(self.request_show_settings.emit)
+        ctrl_row.addWidget(gear_btn)
+
+        stop_btn = QPushButton("■ 停止")
+        stop_btn.setFixedHeight(24)
+        stop_btn.setStyleSheet(
+            "QPushButton { background: rgba(70,30,30,200); color: #ff6b6b; font-size: 12px; "
+            "border: 1px solid #ff6b6b; border-radius: 4px; padding: 2px 10px; }"
+            "QPushButton:hover { background: rgba(90,40,40,220); }"
+        )
+        stop_btn.clicked.connect(self.request_stop.emit)
+        ctrl_row.addWidget(stop_btn)
+
+        layout.addLayout(ctrl_row)
 
         # ── EXP Section ──
         self._exp_section = QWidget()
@@ -165,6 +201,7 @@ class FloatingOverlay(QWidget):
         gold_layout.setSpacing(6)
         self._gold_label = QLabel("💰 開啟背包後點記錄")
         self._gold_label.setStyleSheet(f"color: {t['accent']}; font-size: 13px;")
+        self._gold_label.setWordWrap(True)
         gold_layout.addWidget(self._gold_label)
         gold_layout.addStretch()
         self._gold_btn = QPushButton("記錄金幣")
@@ -332,27 +369,39 @@ class FloatingOverlay(QWidget):
 
     @pyqtSlot()
     def _on_record_gold(self):
-        """Capture gold from the inventory screen."""
+        """Capture gold from the inventory screen — runs on main thread."""
         self._gold_label.setText("💰 讀取中...")
+        self._gold_btn.setEnabled(False)
         QApplication.processEvents()
 
-        import threading
-        def _do():
-            amount = capture_gold()
-            QTimer.singleShot(0, lambda: self._on_gold_result(amount))
-        threading.Thread(target=_do, daemon=True).start()
+        amount = capture_gold()
 
-    def _on_gold_result(self, amount: int | None):
+        self._gold_btn.setEnabled(True)
         if amount is not None and self._tracker:
             self._tracker.record_gold(amount)
-            if self._tracker.gold_start == amount:
-                self._gold_label.setText(f"💰 起始：{fmt_wan(amount)}")
-            else:
-                earned = amount - self._tracker.gold_start
-                self._gold_label.setText(f"💰 +{fmt_wan(earned)} ({fmt_wan(amount)})")
+            self._update_gold_display()
             self._gold_btn.setText("更新金幣")
         else:
             self._gold_label.setText("💰 讀取失敗，請開啟背包")
+
+    def _update_gold_display(self):
+        if not self._tracker or self._tracker.gold_start is None:
+            return
+        t = self._tracker
+        if t.gold_current == t.gold_start:
+            self._gold_label.setText(f"💰 起始：{fmt_wan(t.gold_start)}")
+        else:
+            earned = t.gold_current - t.gold_start
+            # Calculate rate
+            import time
+            elapsed_min = (t.gold_timestamp - t.start_time) / 60.0 if t.start_time and t.gold_timestamp else 0
+            rate_min = earned / elapsed_min if elapsed_min > 0 else 0
+            rate_hour = rate_min * 60
+
+            lines = f"💰 +{fmt_wan(earned)}"
+            if rate_min > 0:
+                lines += f"  |  {fmt_wan(rate_min)}/分  |  {fmt_wan(rate_hour)}/時"
+            self._gold_label.setText(lines)
 
     def show_at_top_left(self):
         self.move(10, 40)
@@ -736,7 +785,12 @@ class MainWindow(QMainWindow):
             self.cooldown_mgr, tracker=self.tracker, theme_name=theme,
             show_exp=use_exp, show_gold=use_gold, show_cooldown=use_cd,
         )
+        self._overlay.request_show_settings.connect(self._show_settings)
+        self._overlay.request_stop.connect(self._on_stop)
         self._overlay.show_at_top_left()
+
+        # Hide main window — overlay is all you need
+        self.hide()
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -745,6 +799,12 @@ class MainWindow(QMainWindow):
         if use_exp:
             self._capture_timer.start()
         self._ui_timer.start()
+
+    @pyqtSlot()
+    def _show_settings(self):
+        """Show the main settings window (called from overlay gear button)."""
+        self.show()
+        self.raise_()
 
     @pyqtSlot()
     def _on_stop(self):
@@ -760,6 +820,7 @@ class MainWindow(QMainWindow):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._status_label.setText("已停止")
+        self.show()  # bring back main window
 
     @pyqtSlot()
     def _do_ocr_tick(self):
