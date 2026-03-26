@@ -277,3 +277,66 @@ def do_capture_and_ocr() -> tuple[OCRResult | None, dict | None]:
 
     finally:
         Path(img_path).unlink(missing_ok=True)
+
+
+def capture_gold() -> int | None:
+    """Capture the full game window and OCR for gold amount.
+
+    Looks for a number near '金幣' text in the inventory panel.
+    User must have the inventory open.
+    Returns the gold amount or None.
+    """
+    game = find_game_window()
+    if game is None:
+        return None
+
+    # Capture the full game window via screencapture
+    x, y, w, h = game["x"], game["y"], game["w"], game["h"]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["screencapture", "-R", f"{x},{y},{w},{h}", "-x", "-t", "png", tmp_path],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        texts = vision_ocr(tmp_path)
+        if not texts:
+            return None
+
+        full = " ".join(texts)
+        logger.info("Gold OCR: %s", full[:120])
+
+        # Look for number followed by or near 金幣
+        # Vision might return "267,353,146" and "金幣" as separate items
+        # Or "267,353,146 金幣" as one item
+        for i, t in enumerate(texts):
+            if "金幣" in t or "金币" in t:
+                # Check if number is in the same text
+                num_match = re.search(r'([\d,]+)', t)
+                if num_match:
+                    return int(num_match.group(1).replace(",", ""))
+                # Check the previous text item for the number
+                if i > 0:
+                    num_match = re.search(r'([\d,]+)', texts[i - 1])
+                    if num_match:
+                        return int(num_match.group(1).replace(",", ""))
+
+        # Fallback: look for large numbers (>1M) that could be gold
+        for t in texts:
+            clean = t.replace(",", "")
+            num_match = re.search(r'(\d{7,12})', clean)
+            if num_match:
+                val = int(num_match.group(1))
+                # Likely gold if it's a large number not matching EXP
+                if val > 1_000_000:
+                    return val
+
+        return None
+
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)

@@ -53,6 +53,9 @@ class Stats:
     acc_10min: dict = field(default_factory=lambda: {"exp": 0, "hp": 0, "mp": 0})
     acc_60min: dict = field(default_factory=lambda: {"exp": 0, "hp": 0, "mp": 0})
     acc_total: dict = field(default_factory=lambda: {"exp": 0, "hp": 0, "mp": 0})
+    # Gold tracking
+    gold_earned: int = 0
+    gold_per_min: float = 0.0
     # Session info
     elapsed_seconds: int = 0
     data_count: int = 0
@@ -64,12 +67,25 @@ class Tracker:
         self.deltas: deque[Delta] = deque(maxlen=7200)
         self.start_time: float | None = None
         self.last_snapshot: Snapshot | None = None
+        self.gold_start: int | None = None
+        self.gold_current: int | None = None
+        self.gold_timestamp: float | None = None
 
     def reset(self):
         self.snapshots.clear()
         self.deltas.clear()
         self.start_time = None
         self.last_snapshot = None
+        self.gold_start = None
+        self.gold_current = None
+        self.gold_timestamp = None
+
+    def record_gold(self, amount: int):
+        """Record a gold snapshot. First call sets the baseline."""
+        if self.gold_start is None:
+            self.gold_start = amount
+        self.gold_current = amount
+        self.gold_timestamp = time.time()
 
     def start(self):
         self.start_time = time.time()
@@ -226,5 +242,13 @@ class Tracker:
         stats.acc_total = total
 
         stats.data_count = len(self.deltas)
+
+        # Gold
+        if self.gold_start is not None and self.gold_current is not None:
+            stats.gold_earned = self.gold_current - self.gold_start
+            if self.start_time and self.gold_timestamp:
+                elapsed_min = (self.gold_timestamp - self.start_time) / 60.0
+                if elapsed_min > 0:
+                    stats.gold_per_min = stats.gold_earned / elapsed_min
 
         return stats

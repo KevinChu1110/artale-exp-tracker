@@ -9,6 +9,7 @@ from PyQt6.QtCore import QPoint, QSize, QTimer, Qt, pyqtSlot
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -23,10 +24,11 @@ from PyQt6.QtWidgets import (
 
 from config.settings import Settings
 from core.cooldown import CooldownManager
-from core.ocr import do_capture_and_ocr, find_game_window
+from core.ocr import capture_gold, do_capture_and_ocr, find_game_window
 from core.tracker import Tracker
 from ui.styles import DARK_THEME
 from ui.themes import THEME_NAMES, get_overlay_stylesheet, get_theme
+from ui.toggle_switch import ToggleSwitch
 
 ICON_DIR = Path.home() / ".artale-tracker" / "skill_icons"
 
@@ -84,12 +86,18 @@ def get_skill_icon_path(slot_index: int) -> str | None:
 #  Compact Floating Overlay
 # ═══════════════════════════════════════════════════════
 class FloatingOverlay(QWidget):
-    def __init__(self, cooldown_mgr: CooldownManager, theme_name: str = "Dark", parent=None):
+    def __init__(self, cooldown_mgr: CooldownManager, tracker=None,
+                 theme_name: str = "Dark", show_exp=True, show_gold=True,
+                 show_cooldown=True, parent=None):
         super().__init__(parent)
         self._drag_pos: QPoint | None = None
         self._cd_mgr = cooldown_mgr
+        self._tracker = tracker
         self._flash_state = False
         self._theme = get_theme(theme_name)
+        self._show_exp = show_exp
+        self._show_gold = show_gold
+        self._show_cooldown = show_cooldown
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -112,9 +120,16 @@ class FloatingOverlay(QWidget):
 
         t = self._theme
 
+        # ── EXP Section ──
+        self._exp_section = QWidget()
+        self._exp_section.setStyleSheet("background: transparent;")
+        exp_layout = QVBoxLayout(self._exp_section)
+        exp_layout.setContentsMargins(0, 0, 0, 0)
+        exp_layout.setSpacing(3)
+
         self._level_label = QLabel("LV.-- | EXP --.--% ")
         self._level_label.setStyleSheet(f"color: {t['accent']}; font-size: 17px; font-weight: bold;")
-        layout.addWidget(self._level_label)
+        exp_layout.addWidget(self._level_label)
 
         row2 = QHBoxLayout()
         row2.setSpacing(6)
@@ -125,28 +140,59 @@ class FloatingOverlay(QWidget):
         self._exp_rate.setStyleSheet(f"color: {t['accent']}; font-size: 26px; font-weight: bold;")
         row2.addWidget(self._exp_rate)
         row2.addStretch()
-        layout.addLayout(row2)
+        exp_layout.addLayout(row2)
 
         self._proj_label = QLabel("10分: 0  |  60分: 0")
         self._proj_label.setStyleSheet(f"color: {t['green']}; font-size: 16px; font-weight: bold;")
-        layout.addWidget(self._proj_label)
+        exp_layout.addWidget(self._proj_label)
 
         self._eta_label = QLabel("升級：剩 -- EXP，約 --")
         self._eta_label.setStyleSheet(f"color: {t['orange']}; font-size: 14px;")
-        layout.addWidget(self._eta_label)
+        exp_layout.addWidget(self._eta_label)
 
         self._elapsed_label = QLabel("0分0秒 | 資料: 0")
         self._elapsed_label.setStyleSheet(f"color: {t['muted']}; font-size: 12px;")
-        layout.addWidget(self._elapsed_label)
+        exp_layout.addWidget(self._elapsed_label)
 
-        # ── Skill cooldowns: big icons with key badge ──
+        self._exp_section.setVisible(self._show_exp)
+        layout.addWidget(self._exp_section)
+
+        # ── Gold Section ──
+        self._gold_section = QWidget()
+        self._gold_section.setStyleSheet("background: transparent;")
+        gold_layout = QHBoxLayout(self._gold_section)
+        gold_layout.setContentsMargins(0, 0, 0, 0)
+        gold_layout.setSpacing(6)
+        self._gold_label = QLabel("💰 開啟背包後點記錄")
+        self._gold_label.setStyleSheet(f"color: {t['accent']}; font-size: 13px;")
+        gold_layout.addWidget(self._gold_label)
+        gold_layout.addStretch()
+        self._gold_btn = QPushButton("記錄金幣")
+        self._gold_btn.setFixedHeight(22)
+        self._gold_btn.setStyleSheet(
+            "QPushButton { background: rgba(60,50,20,180); color: #f0c040; "
+            "border: 1px solid #f0c040; border-radius: 4px; font-size: 11px; padding: 2px 8px; }"
+            "QPushButton:hover { background: rgba(80,70,30,200); }"
+        )
+        self._gold_btn.clicked.connect(self._on_record_gold)
+        gold_layout.addWidget(self._gold_btn)
+
+        self._gold_section.setVisible(self._show_gold)
+        layout.addWidget(self._gold_section)
+
+        # ── Skill Cooldowns Section ──
+        self._cd_section = QWidget()
+        self._cd_section.setStyleSheet("background: transparent;")
+        cd_layout = QHBoxLayout(self._cd_section)
+        cd_layout.setContentsMargins(0, 4, 0, 0)
+        cd_layout.setSpacing(8)
         self._cd_widgets = []
-        cd_row = QHBoxLayout()
-        cd_row.setSpacing(8)
         for i in range(4):
             w = self._make_cd_widget(i)
-            cd_row.addWidget(w)
-        layout.addLayout(cd_row)
+            cd_layout.addWidget(w)
+
+        self._cd_section.setVisible(self._show_cooldown)
+        layout.addWidget(self._cd_section)
 
     def _make_cd_widget(self, index: int) -> QWidget:
         SZ = 80  # full widget size
@@ -218,7 +264,10 @@ class FloatingOverlay(QWidget):
             self._eta_label.setText("升級：剩 --，約 --")
         mins = stats.elapsed_seconds // 60
         secs = stats.elapsed_seconds % 60
-        self._elapsed_label.setText(f"{mins}分{secs}秒 | 資料: {stats.data_count}")
+        elapsed_str = f"{mins}分{secs}秒 | 資料: {stats.data_count}"
+        if stats.gold_per_min > 0:
+            elapsed_str += f" | 💰{fmt_wan(stats.gold_per_min)}/分"
+        self._elapsed_label.setText(elapsed_str)
 
     @pyqtSlot()
     def _tick(self):
@@ -281,6 +330,30 @@ class FloatingOverlay(QWidget):
                     "QWidget { background-color: rgba(40, 44, 52, 200); border-radius: 6px; }"
                 )
 
+    @pyqtSlot()
+    def _on_record_gold(self):
+        """Capture gold from the inventory screen."""
+        self._gold_label.setText("💰 讀取中...")
+        QApplication.processEvents()
+
+        import threading
+        def _do():
+            amount = capture_gold()
+            QTimer.singleShot(0, lambda: self._on_gold_result(amount))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_gold_result(self, amount: int | None):
+        if amount is not None and self._tracker:
+            self._tracker.record_gold(amount)
+            if self._tracker.gold_start == amount:
+                self._gold_label.setText(f"💰 起始：{fmt_wan(amount)}")
+            else:
+                earned = amount - self._tracker.gold_start
+                self._gold_label.setText(f"💰 +{fmt_wan(earned)} ({fmt_wan(amount)})")
+            self._gold_btn.setText("更新金幣")
+        else:
+            self._gold_label.setText("💰 讀取失敗，請開啟背包")
+
     def show_at_top_left(self):
         self.move(10, 40)
         self.show()
@@ -329,7 +402,15 @@ class MainWindow(QMainWindow):
 
         pos = self.settings.get("window_pos")
         if pos:
-            self.move(pos["x"], pos["y"])
+            # Validate position is within a visible screen
+            screen = QApplication.primaryScreen()
+            if screen:
+                geo = screen.availableGeometry()
+                x, y = pos["x"], pos["y"]
+                if geo.contains(x, y):
+                    self.move(x, y)
+                else:
+                    self.move(100, 100)
 
     def _setup_window(self):
         self.setWindowTitle("Artale EXP Tracker")
@@ -338,7 +419,7 @@ class MainWindow(QMainWindow):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setFixedSize(320, 420)
+        self.setFixedSize(380, 420)
 
     def _build_ui(self):
         central = QWidget()
@@ -385,22 +466,41 @@ class MainWindow(QMainWindow):
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
-        # ── Theme selector ──
+        # ── Module toggles ──
+        toggle_row1 = QHBoxLayout()
+        toggle_row1.setSpacing(12)
+        self._chk_exp = ToggleSwitch("經驗追蹤", self.settings.get("mod_exp", True))
+        self._chk_gold = ToggleSwitch("金幣追蹤", self.settings.get("mod_gold", True))
+        self._chk_cooldown = ToggleSwitch("技能冷卻", self.settings.get("mod_cooldown", True))
+        toggle_row1.addWidget(self._chk_exp)
+        toggle_row1.addWidget(self._chk_gold)
+        toggle_row1.addWidget(self._chk_cooldown)
+        toggle_row1.addStretch()
+        layout.addLayout(toggle_row1)
+
+        # Theme selector
         theme_row = QHBoxLayout()
-        theme_row.addWidget(QLabel("懸浮框主題："))
+        theme_lbl = QLabel("背景主題：")
+        theme_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
         self._theme_combo = QComboBox()
         self._theme_combo.addItems(THEME_NAMES)
         saved_theme = self.settings.get("theme", "Dark")
         idx = THEME_NAMES.index(saved_theme) if saved_theme in THEME_NAMES else 0
         self._theme_combo.setCurrentIndex(idx)
+        theme_row.addWidget(theme_lbl)
         theme_row.addWidget(self._theme_combo)
         theme_row.addStretch()
         layout.addLayout(theme_row)
 
-        # ── Skill Cooldown Config ──
+        # ── Skill Cooldown Config (shown when cooldown enabled) ──
+        self._skill_section = QWidget()
+        skill_layout = QVBoxLayout(self._skill_section)
+        skill_layout.setContentsMargins(0, 0, 0, 0)
+        skill_layout.setSpacing(4)
+
         skill_title = QLabel("技能冷卻設定")
         skill_title.setObjectName("sectionTitle")
-        layout.addWidget(skill_title)
+        skill_layout.addWidget(skill_title)
 
         grid = QGridLayout()
         grid.setSpacing(6)
@@ -423,9 +523,14 @@ class MainWindow(QMainWindow):
                 )
             icon_btn.clicked.connect(lambda checked, idx=i: self._capture_icon(idx))
 
-            key_input = QLineEdit()
-            key_input.setPlaceholderText("按鍵")
-            key_input.setFixedWidth(60)
+            key_btn = QPushButton("設定")
+            key_btn.setFixedWidth(70)
+            key_btn.setStyleSheet(
+                "QPushButton { border: 1px solid #3d4149; border-radius: 4px; "
+                "color: #e0e0e0; font-size: 13px; padding: 4px; }"
+                "QPushButton:hover { border-color: #f0c040; }"
+            )
+            key_btn.clicked.connect(lambda checked, idx=i: self._start_key_listen(idx))
 
             cd_input = QDoubleSpinBox()
             cd_input.setRange(0, 600)
@@ -434,16 +539,25 @@ class MainWindow(QMainWindow):
             cd_input.setFixedWidth(80)
 
             grid.addWidget(icon_btn, i + 1, 0)
-            grid.addWidget(key_input, i + 1, 1)
+            grid.addWidget(key_btn, i + 1, 1)
             grid.addWidget(cd_input, i + 1, 2)
 
             self._skill_inputs.append({
                 "icon_btn": icon_btn,
-                "key": key_input,
+                "key_btn": key_btn,
+                "key_value": "",
                 "cd": cd_input,
             })
 
-        layout.addLayout(grid)
+        skill_layout.addLayout(grid)
+        layout.addWidget(self._skill_section)
+
+        # Toggle visibility of skill section
+        self._chk_cooldown.toggled.connect(self._skill_section.setVisible)
+        self._skill_section.setVisible(self._chk_cooldown.isChecked())
+
+        # Remove unused QCheckBox import
+
 
     def _capture_icon(self, slot_index: int):
         """Let user screenshot a skill icon from the game."""
@@ -474,19 +588,73 @@ class MainWindow(QMainWindow):
         else:
             self._status_label.setText("已取消")
 
+    def _start_key_listen(self, slot_index: int):
+        """Put a key button into 'listening' mode — next key press sets the key."""
+        btn = self._skill_inputs[slot_index]["key_btn"]
+        btn.setText("按任意鍵...")
+        btn.setStyleSheet(
+            "QPushButton { border: 2px solid #f0c040; border-radius: 4px; "
+            "color: #f0c040; font-size: 12px; padding: 4px; background: rgba(240,192,64,30); }"
+        )
+        self._listening_slot = slot_index
+        btn.setFocus()
+
+    def keyPressEvent(self, event):
+        """Capture key press when in listening mode."""
+        if hasattr(self, '_listening_slot') and self._listening_slot is not None:
+            idx = self._listening_slot
+            self._listening_slot = None
+
+            key = event.text().lower().strip()
+            # Handle special keys
+            key_map = {
+                Qt.Key.Key_Shift: "shift",
+                Qt.Key.Key_Control: "ctrl",
+                Qt.Key.Key_Alt: "alt",
+                Qt.Key.Key_Space: "space",
+                Qt.Key.Key_Tab: "tab",
+                Qt.Key.Key_Return: "enter",
+                Qt.Key.Key_F1: "f1", Qt.Key.Key_F2: "f2", Qt.Key.Key_F3: "f3",
+                Qt.Key.Key_F4: "f4", Qt.Key.Key_F5: "f5", Qt.Key.Key_F6: "f6",
+                Qt.Key.Key_F7: "f7", Qt.Key.Key_F8: "f8", Qt.Key.Key_F9: "f9",
+                Qt.Key.Key_F10: "f10", Qt.Key.Key_F11: "f11", Qt.Key.Key_F12: "f12",
+                Qt.Key.Key_Delete: "delete", Qt.Key.Key_Insert: "insert",
+                Qt.Key.Key_Home: "home", Qt.Key.Key_End: "end",
+            }
+            if event.key() in key_map:
+                key = key_map[event.key()]
+            elif event.key() == Qt.Key.Key_Escape:
+                # Cancel
+                key = self._skill_inputs[idx]["key_value"]
+
+            if key:
+                self._skill_inputs[idx]["key_value"] = key
+                btn = self._skill_inputs[idx]["key_btn"]
+                btn.setText(key.upper())
+                btn.setStyleSheet(
+                    "QPushButton { border: 1px solid #3d4149; border-radius: 4px; "
+                    "color: #e0e0e0; font-size: 13px; padding: 4px; }"
+                    "QPushButton:hover { border-color: #f0c040; }"
+                )
+            return
+
+        super().keyPressEvent(event)
+
     def _load_skill_config(self):
         skills = self.settings.get("skills", [])
         for i, skill in enumerate(skills):
             if i >= 4:
                 break
-            self._skill_inputs[i]["key"].setText(skill.get("key", ""))
+            key = skill.get("key", "")
+            self._skill_inputs[i]["key_value"] = key
+            self._skill_inputs[i]["key_btn"].setText(key.upper() if key else "設定")
             self._skill_inputs[i]["cd"].setValue(skill.get("cooldown", 0))
 
     def _save_skill_config(self):
         skills = []
         for inp in self._skill_inputs:
             skills.append({
-                "key": inp["key"].text(),
+                "key": inp["key_value"],
                 "cooldown": inp["cd"].value(),
             })
         self.settings.set("skills", skills)
@@ -494,10 +662,10 @@ class MainWindow(QMainWindow):
 
     def _apply_skill_config(self):
         for i, inp in enumerate(self._skill_inputs):
-            key = inp["key"].text()
+            key = inp["key_value"]
             self.cooldown_mgr.configure_slot(
                 i,
-                name=key.upper(),  # use key as display name
+                name=key.upper() if key else "",
                 key=key,
                 cooldown=inp["cd"].value(),
             )
@@ -541,25 +709,41 @@ class MainWindow(QMainWindow):
             self._status_label.setText("找不到遊戲視窗！")
             return
 
+        # Save toggle states
+        use_exp = self._chk_exp.isChecked()
+        use_gold = self._chk_gold.isChecked()
+        use_cd = self._chk_cooldown.isChecked()
+        self.settings.set("mod_exp", use_exp)
+        self.settings.set("mod_gold", use_gold)
+        self.settings.set("mod_cooldown", use_cd)
+
         self._save_skill_config()
-        self._apply_skill_config()
+        if use_cd:
+            self._apply_skill_config()
 
         self._is_capturing = True
         self.tracker.reset()
         self.tracker.start()
-        self.cooldown_mgr.start()
+
+        if use_cd:
+            self.cooldown_mgr.start()
 
         theme = self._theme_combo.currentText()
         self.settings.set("theme", theme)
+        self.settings.save()
 
-        self._overlay = FloatingOverlay(self.cooldown_mgr, theme_name=theme)
+        self._overlay = FloatingOverlay(
+            self.cooldown_mgr, tracker=self.tracker, theme_name=theme,
+            show_exp=use_exp, show_gold=use_gold, show_cooldown=use_cd,
+        )
         self._overlay.show_at_top_left()
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._status_label.setText(f"追蹤中... {datetime.now().strftime('%H:%M:%S')}")
 
-        self._capture_timer.start()
+        if use_exp:
+            self._capture_timer.start()
         self._ui_timer.start()
 
     @pyqtSlot()

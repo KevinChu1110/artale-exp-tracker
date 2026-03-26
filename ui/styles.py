@@ -184,7 +184,43 @@ QScrollBar::handle:vertical {
 }
 
 /* Input fields */
-QSpinBox, QLineEdit {
+QSpinBox, QDoubleSpinBox, QLineEdit {
+    background-color: #22262e;
+    border: 1px solid #3d4149;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #e0e0e0;
+    font-size: 13px;
+}
+
+QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {
+    border-color: #f0c040;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    background-color: #2d3139;
+    border: none;
+    width: 16px;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #a0a0a0;
+    width: 0; height: 0;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #a0a0a0;
+    width: 0; height: 0;
+}
+
+QComboBox {
     background-color: #22262e;
     border: 1px solid #3d4149;
     border-radius: 4px;
@@ -193,8 +229,15 @@ QSpinBox, QLineEdit {
     font-size: 12px;
 }
 
-QSpinBox:focus, QLineEdit:focus {
-    border-color: #f0c040;
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #22262e;
+    color: #e0e0e0;
+    selection-background-color: #3d4149;
 }
 
 /* Compact mode toggle */
