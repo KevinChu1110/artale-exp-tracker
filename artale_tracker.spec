@@ -77,9 +77,11 @@ app = BUNDLE(
     icon=None,  # TODO: add app icon later
     bundle_identifier='com.artale.exptracker',
     info_plist={
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleShortVersionString': '1.2.0',
         'CFBundleName': 'Artale EXP Tracker',
+        'CFBundleIdentifier': 'com.artale.exptracker',
         'NSAppleEventsUsageDescription': 'Required for screen capture',
-        'NSScreenCaptureUsageDescription': 'Required to read game status bar',
+        'NSScreenCaptureUsageDescription': 'Need to capture game screen to read EXP/HP/MP values',
+        'NSAccessibilityUsageDescription': 'Need to listen for skill hotkeys for cooldown tracking',
     },
 )
